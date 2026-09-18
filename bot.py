@@ -1,6 +1,7 @@
 import os
 import random
 import threading
+import asyncio
 from datetime import datetime, timezone
 
 import discord
@@ -15,12 +16,16 @@ from flask import Flask, jsonify
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 
+# Your Discord user ID
 YOUR_USER_ID = 722036964584587284
 
+# Discord server
 SERVER_ID = 1180200730854953131
+
+# Voice channel the bot should stay in
 VOICE_CHANNEL_ID = 1496047914575724555
 
-# Original user is watched by default
+# User watched by default
 TARGET_USER_ID = 1159066007508373524
 
 # Set to 0 to allow /msg in any channel
@@ -84,6 +89,7 @@ def health():
         "status": "online",
         "bot": str(bot.user) if bot.user else "connecting",
         "watched_users": len(watched_users),
+        "voice_connected": is_voice_connected(),
         "time": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -110,12 +116,20 @@ intents.voice_states = True
 intents.message_content = True
 
 
+# ============================================================
+# BOT
+# ============================================================
+
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
 )
 
 tree = bot.tree
+
+
+# Prevent multiple voice connection attempts
+voice_connect_lock = asyncio.Lock()
 
 
 # ============================================================
@@ -182,6 +196,25 @@ def format_duration(duration) -> str:
     return " ".join(parts)
 
 
+def is_voice_connected() -> bool:
+    """Check whether Koode is currently connected to the configured VC."""
+
+    guild = bot.get_guild(SERVER_ID)
+
+    if guild is None:
+        return False
+
+    voice_client = discord.utils.get(
+        bot.voice_clients,
+        guild=guild,
+    )
+
+    if voice_client is None:
+        return False
+
+    return voice_client.is_connected()
+
+
 # ============================================================
 # BOT ACTIVITY
 # ============================================================
@@ -194,14 +227,21 @@ async def set_bot_activity():
         name=music_name,
     )
 
-    await bot.change_presence(
-        status=discord.Status.dnd,
-        activity=activity,
-    )
+    try:
+        await bot.change_presence(
+            status=discord.Status.dnd,
+            activity=activity,
+        )
 
-    print(
-        f"Activity set to: Listening to {music_name}"
-    )
+        print(
+            f"🎧 Activity set: Listening to {music_name}"
+        )
+
+    except Exception as error:
+        print(
+            f"⚠️ Failed to update bot activity: "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 # ============================================================
@@ -218,18 +258,24 @@ async def send_notification(message: str):
             await user.send(message)
 
             print(
-                f"DM sent: {message}"
+                f"📩 DM sent: {message}"
             )
 
     except discord.Forbidden:
         print(
-            "Could not send DM. "
+            "⚠️ Could not send DM. "
             "User may have DMs disabled."
         )
 
     except discord.HTTPException as error:
         print(
-            f"Failed to send DM: {error}"
+            f"⚠️ Failed to send DM: {error}"
+        )
+
+    except Exception as error:
+        print(
+            f"⚠️ Unexpected DM error: "
+            f"{type(error).__name__}: {error}"
         )
 
 
@@ -238,64 +284,168 @@ async def send_notification(message: str):
 # ============================================================
 
 async def connect_to_voice():
-    guild = bot.get_guild(
-        SERVER_ID
+    """
+    Ensure Koode is connected to the configured voice channel.
+
+    This function is safe to call multiple times.
+    """
+
+    async with voice_connect_lock:
+
+        guild = bot.get_guild(
+            SERVER_ID
+        )
+
+        if guild is None:
+            print("⚠️ Server not found.")
+            return
+
+        voice_channel = guild.get_channel(
+            VOICE_CHANNEL_ID
+        )
+
+        if voice_channel is None:
+            print("⚠️ Voice channel not found.")
+            return
+
+        if not isinstance(
+            voice_channel,
+            discord.VoiceChannel,
+        ):
+            print(
+                "⚠️ Configured channel is not "
+                "a normal voice channel."
+            )
+            return
+
+        current_voice_client = discord.utils.get(
+            bot.voice_clients,
+            guild=guild,
+        )
+
+        # ----------------------------------------------------
+        # Already connected
+        # ----------------------------------------------------
+
+        if (
+            current_voice_client
+            and current_voice_client.is_connected()
+        ):
+            print(
+                f"🔊 Voice already connected: "
+                f"{current_voice_client.channel.name}"
+            )
+            return
+
+        # ----------------------------------------------------
+        # Stale / disconnected voice client
+        # ----------------------------------------------------
+
+        if current_voice_client:
+
+            print(
+                "⚠️ Found stale voice connection. "
+                "Cleaning it up..."
+            )
+
+            try:
+                await current_voice_client.disconnect(
+                    force=True
+                )
+
+            except Exception as error:
+                print(
+                    f"⚠️ Failed to clean stale voice "
+                    f"connection: {error}"
+                )
+
+        # ----------------------------------------------------
+        # Connect
+        # ----------------------------------------------------
+
+        try:
+
+            print(
+                f"🔊 Connecting to voice channel: "
+                f"{voice_channel.name}"
+            )
+
+            await voice_channel.connect(
+                reconnect=True
+            )
+
+            print(
+                f"✅ Voice connected: "
+                f"{voice_channel.name}"
+            )
+
+        except discord.Forbidden:
+            print(
+                "❌ Bot does not have permission "
+                "to join this voice channel."
+            )
+
+        except discord.HTTPException as error:
+            print(
+                f"❌ Discord HTTP error while "
+                f"connecting to voice: {error}"
+            )
+
+        except asyncio.TimeoutError:
+            print(
+                "❌ Voice connection timed out."
+            )
+
+        except Exception as error:
+            print(
+                f"❌ Unexpected voice connection error: "
+                f"{type(error).__name__}: {error}"
+            )
+
+
+# ============================================================
+# VOICE STATE UPDATE
+# ============================================================
+
+@bot.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+):
+
+    # Only care about Koode itself
+    if member.id != bot.user.id:
+        return
+
+    before_channel = (
+        before.channel.name
+        if before.channel
+        else "None"
     )
 
-    if guild is None:
-        print("Server not found.")
-        return
-
-    voice_channel = guild.get_channel(
-        VOICE_CHANNEL_ID
+    after_channel = (
+        after.channel.name
+        if after.channel
+        else "None"
     )
 
-    if voice_channel is None:
-        print("Voice channel not found.")
-        return
-
-    if not isinstance(
-        voice_channel,
-        discord.VoiceChannel,
-    ):
-        print(
-            "Configured channel is not "
-            "a normal voice channel."
-        )
-        return
-
-    current_voice_client = discord.utils.get(
-        bot.voice_clients,
-        guild=guild,
+    print(
+        f"🔊 Voice state changed: "
+        f"{before_channel} -> {after_channel}"
     )
 
-    if (
-        current_voice_client
-        and current_voice_client.is_connected()
-    ):
-        print(
-            "Bot is already connected to voice."
-        )
-        return
-
-    try:
-        await voice_channel.connect()
+    # If Koode was disconnected from voice,
+    # try to restore the configured connection.
+    if after.channel is None:
 
         print(
-            f"Connected to voice channel: "
-            f"{voice_channel.name}"
+            "⚠️ Koode was disconnected from voice."
         )
 
-    except discord.Forbidden:
-        print(
-            "Bot does not have permission "
-            "to join this voice channel."
-        )
+        await asyncio.sleep(2)
 
-    except discord.HTTPException as error:
-        print(
-            f"Could not connect to voice: {error}"
-        )
+        await connect_to_voice()
 
 
 # ============================================================
@@ -304,31 +454,78 @@ async def connect_to_voice():
 
 @bot.event
 async def on_ready():
-    print("=" * 50)
-    print(f"Logged in as: {bot.user}")
-    print(f"Bot ID: {bot.user.id}")
-    print(f"Connected servers: {len(bot.guilds)}")
-    print(
-        f"Watching users: {len(watched_users)}"
-    )
-    print("=" * 50)
 
+    print("=" * 60)
+    print(f"🤖 Logged in as: {bot.user}")
+    print(f"🆔 Bot ID: {bot.user.id}")
+    print(f"🌐 Connected servers: {len(bot.guilds)}")
+    print(f"👀 Watching users: {len(watched_users)}")
+    print("=" * 60)
+
+    # Set activity
     await set_bot_activity()
 
+    # Sync commands
     try:
+
         synced_commands = await tree.sync()
 
         print(
-            f"Synced {len(synced_commands)} "
+            f"✅ Synced {len(synced_commands)} "
             f"slash commands."
         )
 
     except Exception as error:
+
         print(
-            f"Failed to sync slash commands: {error}"
+            f"❌ Failed to sync slash commands: "
+            f"{type(error).__name__}: {error}"
         )
 
+    # Connect to configured voice channel
     await connect_to_voice()
+
+
+# ============================================================
+# DISCONNECT / RESUME
+# ============================================================
+
+@bot.event
+async def on_disconnect():
+
+    print(
+        "⚠️ Discord Gateway disconnected."
+    )
+
+    print(
+        "discord.py will attempt to reconnect automatically."
+    )
+
+
+@bot.event
+async def on_resumed():
+
+    print(
+        "✅ Discord Gateway connection resumed."
+    )
+
+    # Refresh activity after reconnect
+    await set_bot_activity()
+
+    # Make sure voice is still connected
+    await asyncio.sleep(2)
+
+    try:
+
+        await connect_to_voice()
+
+    except Exception as error:
+
+        print(
+            f"⚠️ Voice recovery failed after "
+            f"Gateway resume: "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 # ============================================================
@@ -340,8 +537,10 @@ async def on_presence_update(
     before: discord.Member,
     after: discord.Member,
 ):
+
     user_id = after.id
 
+    # Ignore users we aren't watching
     if user_id not in watched_users:
         return
 
@@ -362,7 +561,7 @@ async def on_presence_update(
     )
 
     print(
-        f"Watched user presence changed: "
+        f"👀 Watched user presence changed: "
         f"{after.display_name}: "
         f"{before_status} -> {after_status}"
     )
@@ -375,6 +574,7 @@ async def on_presence_update(
         not before_active
         and after_active
     ):
+
         online_since[user_id] = (
             datetime.now(timezone.utc)
         )
@@ -395,11 +595,13 @@ async def on_presence_update(
         before_active
         and not after_active
     ):
+
         start_time = online_since.get(
             user_id
         )
 
         if start_time:
+
             duration = (
                 datetime.now(timezone.utc)
                 - start_time
@@ -412,30 +614,22 @@ async def on_presence_update(
             del online_since[user_id]
 
             print(
-                f"{after.display_name} was "
+                f"⏱️ {after.display_name} was "
                 f"online for "
                 f"{format_duration(duration)}"
             )
 
+        return
 
-# ============================================================
-# DISCONNECT / RESUME
-# ============================================================
-
-@bot.event
-async def on_disconnect():
-    print(
-        "Bot disconnected from Discord."
-    )
-
-
-@bot.event
-async def on_resumed():
-    print(
-        "Bot connection resumed."
-    )
-
-    await set_bot_activity()
+    # --------------------------------------------------------
+    # Active -> Active
+    #
+    # Online -> Idle
+    # Idle -> DND
+    # DND -> Online
+    #
+    # These are intentionally ignored.
+    # --------------------------------------------------------
 
 
 # ============================================================
@@ -453,12 +647,14 @@ async def msg_command(
     interaction: discord.Interaction,
     message: str,
 ):
+
     if MESSAGE_CHANNEL_ID != 0:
 
         if (
             interaction.channel_id
             != MESSAGE_CHANNEL_ID
         ):
+
             await interaction.response.send_message(
                 "❌ This command cannot be "
                 "used in this channel.",
@@ -492,12 +688,14 @@ async def status_command(
     interaction: discord.Interaction,
     user: discord.User | None = None,
 ):
+
     if user is None:
         user_id = TARGET_USER_ID
     else:
         user_id = user.id
 
     if user_id not in watched_users:
+
         await interaction.response.send_message(
             "❌ That user is not being watched.",
             ephemeral=True,
@@ -510,6 +708,7 @@ async def status_command(
     )
 
     if guild is None:
+
         await interaction.response.send_message(
             "❌ Server not found.",
             ephemeral=True,
@@ -522,6 +721,7 @@ async def status_command(
     )
 
     if member is None:
+
         await interaction.response.send_message(
             "❌ User is not found in the server.",
             ephemeral=True,
@@ -550,6 +750,7 @@ async def status_command(
 async def ping_command(
     interaction: discord.Interaction,
 ):
+
     latency = round(
         bot.latency * 1000
     )
@@ -570,6 +771,7 @@ async def ping_command(
 async def info_command(
     interaction: discord.Interaction,
 ):
+
     voice_status = "Not connected"
 
     for voice_client in bot.voice_clients:
@@ -580,6 +782,7 @@ async def info_command(
         ):
 
             if voice_client.is_connected():
+
                 voice_status = (
                     voice_client.channel.name
                 )
@@ -648,6 +851,7 @@ async def music_command(
     interaction: discord.Interaction,
     name: str,
 ):
+
     activity = discord.Activity(
         type=discord.ActivityType.listening,
         name=name,
@@ -675,13 +879,13 @@ async def music_command(
 async def vc_command(
     interaction: discord.Interaction,
 ):
-    await connect_to_voice()
 
     await interaction.response.send_message(
-        "🔊 Connecting to the configured "
-        "voice channel.",
+        "🔊 Checking voice connection...",
         ephemeral=True,
     )
+
+    await connect_to_voice()
 
 
 # ============================================================
@@ -695,15 +899,19 @@ async def vc_command(
 async def leave_command(
     interaction: discord.Interaction,
 ):
+
     disconnected = False
 
-    for voice_client in bot.voice_clients:
+    for voice_client in list(bot.voice_clients):
 
         if (
             voice_client.guild.id
             == interaction.guild_id
         ):
-            await voice_client.disconnect()
+
+            await voice_client.disconnect(
+                force=True
+            )
 
             disconnected = True
 
@@ -757,6 +965,7 @@ async def watch_command(
     action: app_commands.Choice[str],
     user: discord.User | None = None,
 ):
+
     # Only bot owner can manage watches
     if interaction.user.id != YOUR_USER_ID:
 
@@ -906,6 +1115,7 @@ async def duration_command(
     interaction: discord.Interaction,
     user: discord.User,
 ):
+
     if user.id not in watched_users:
 
         await interaction.response.send_message(
@@ -916,7 +1126,10 @@ async def duration_command(
 
         return
 
+    # --------------------------------------------------------
     # Currently online
+    # --------------------------------------------------------
+
     if user.id in online_since:
 
         duration = (
@@ -932,7 +1145,10 @@ async def duration_command(
 
         return
 
+    # --------------------------------------------------------
     # Currently offline but has history
+    # --------------------------------------------------------
+
     if user.id in last_online_duration:
 
         duration = last_online_duration[
@@ -948,7 +1164,10 @@ async def duration_command(
 
         return
 
+    # --------------------------------------------------------
     # No history
+    # --------------------------------------------------------
+
     await interaction.response.send_message(
         f"ℹ️ I don't have enough presence "
         f"history for **{user.display_name}** yet."
@@ -961,6 +1180,11 @@ async def duration_command(
 
 if __name__ == "__main__":
 
+    print("=" * 60)
+    print("🚀 Starting Koode...")
+    print("=" * 60)
+
+    # Start Flask health server
     flask_thread = threading.Thread(
         target=run_flask,
         daemon=True,
@@ -968,4 +1192,5 @@ if __name__ == "__main__":
 
     flask_thread.start()
 
+    # Start Discord bot
     bot.run(TOKEN)
