@@ -1,7 +1,6 @@
 import os
 import random
 import threading
-import asyncio
 from datetime import datetime, timezone
 
 import discord
@@ -10,31 +9,28 @@ from discord.ext import commands
 from flask import Flask, jsonify
 
 
-# ============================================================
+# =========================================================
 # CONFIGURATION
-# ============================================================
+# =========================================================
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 
-# Your Discord user ID
+# Default monitored user
+TARGET_USER_ID = 1159066007508373524
+
+# Bot owner
 YOUR_USER_ID = 722036964584587284
 
 # Discord server
 SERVER_ID = 1180200730854953131
 
-# Voice channel the bot should stay in
+# Voice channel
 VOICE_CHANNEL_ID = 1496047914575724555
 
-# User watched by default
-TARGET_USER_ID = 1159066007508373524
-
-# Set to 0 to allow /msg in any channel
+# Set to a text channel ID if /msg should work only there.
+# Keep 0 to allow /msg in any channel.
 MESSAGE_CHANNEL_ID = 0
 
-
-# ============================================================
-# MUSIC ACTIVITY
-# ============================================================
 
 MUSIC_NAMES = [
     "Safarnama",
@@ -55,43 +51,54 @@ MUSIC_NAMES = [
 ]
 
 
-# ============================================================
-# WATCH / PRESENCE DATA
-# ============================================================
+# =========================================================
+# WATCH / DURATION DATA
+# =========================================================
 
-# Users currently being watched
+# Users currently being monitored.
+# The original target user is watched by default.
 watched_users = {
     TARGET_USER_ID
 }
 
-# When a watched user became active
+# When a watched user became active.
+#
+# Example:
+# {
+#     123456789: datetime(...)
+# }
 online_since = {}
 
-# Last completed online session duration
+# Last completed active duration.
+#
+# Example:
+# {
+#     123456789: 3600
+# }
 last_online_duration = {}
 
 
-# ============================================================
-# FLASK
-# ============================================================
+# =========================================================
+# FLASK SERVER FOR RENDER
+# =========================================================
 
 app = Flask(__name__)
 
 
 @app.route("/")
 def home():
-    return "Koode Discord bot is running."
+    return "Discord bot is running."
 
 
 @app.route("/health")
 def health():
-    return jsonify({
-        "status": "online",
-        "bot": str(bot.user) if bot.user else "connecting",
-        "watched_users": len(watched_users),
-        "voice_connected": is_voice_connected(),
-        "time": datetime.now(timezone.utc).isoformat(),
-    })
+    return jsonify(
+        {
+            "status": "online",
+            "bot": str(bot.user) if bot.user else "connecting",
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 def run_flask():
@@ -103,22 +110,18 @@ def run_flask():
     )
 
 
-# ============================================================
-# DISCORD INTENTS
-# ============================================================
+# =========================================================
+# DISCORD BOT SETUP
+# =========================================================
 
 intents = discord.Intents.default()
 
-intents.guilds = True
-intents.members = True
 intents.presences = True
+intents.members = True
+intents.guilds = True
 intents.voice_states = True
 intents.message_content = True
 
-
-# ============================================================
-# BOT
-# ============================================================
 
 bot = commands.Bot(
     command_prefix="!",
@@ -128,15 +131,13 @@ bot = commands.Bot(
 tree = bot.tree
 
 
-# Prevent multiple voice connection attempts
-voice_connect_lock = asyncio.Lock()
-
-
-# ============================================================
-# HELPERS
-# ============================================================
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
 
 def get_status_text(status: discord.Status) -> str:
+    """Convert Discord status to readable text."""
+
     status_names = {
         discord.Status.online: "Online",
         discord.Status.idle: "Idle",
@@ -151,30 +152,23 @@ def get_status_text(status: discord.Status) -> str:
     )
 
 
-def is_active(status: discord.Status) -> bool:
+def is_active_status(status: discord.Status) -> bool:
+    """Return True if the Discord status is considered active."""
+
     return status not in (
         discord.Status.offline,
         discord.Status.invisible,
     )
 
 
-def format_duration(duration) -> str:
-    total_seconds = int(duration.total_seconds())
+def format_duration(seconds: float) -> str:
+    """Convert seconds into a readable duration."""
 
-    days, remainder = divmod(
-        total_seconds,
-        86400,
-    )
+    seconds = int(seconds)
 
-    hours, remainder = divmod(
-        remainder,
-        3600,
-    )
-
-    minutes, seconds = divmod(
-        remainder,
-        60,
-    )
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
 
     parts = []
 
@@ -187,39 +181,15 @@ def format_duration(duration) -> str:
     if minutes:
         parts.append(f"{minutes}m")
 
-    if seconds and not parts:
+    if seconds or not parts:
         parts.append(f"{seconds}s")
-
-    if not parts:
-        return "0s"
 
     return " ".join(parts)
 
 
-def is_voice_connected() -> bool:
-    """Check whether Koode is currently connected to the configured VC."""
-
-    guild = bot.get_guild(SERVER_ID)
-
-    if guild is None:
-        return False
-
-    voice_client = discord.utils.get(
-        bot.voice_clients,
-        guild=guild,
-    )
-
-    if voice_client is None:
-        return False
-
-    return voice_client.is_connected()
-
-
-# ============================================================
-# BOT ACTIVITY
-# ============================================================
-
 async def set_bot_activity():
+    """Set bot status to DND and show Listening to a random song."""
+
     music_name = random.choice(MUSIC_NAMES)
 
     activity = discord.Activity(
@@ -227,414 +197,287 @@ async def set_bot_activity():
         name=music_name,
     )
 
-    try:
-        await bot.change_presence(
-            status=discord.Status.dnd,
-            activity=activity,
-        )
+    await bot.change_presence(
+        status=discord.Status.dnd,
+        activity=activity,
+    )
 
-        print(
-            f"🎧 Activity set: Listening to {music_name}"
-        )
+    print(f"Activity set to: Listening to {music_name}")
 
-    except Exception as error:
-        print(
-            f"⚠️ Failed to update bot activity: "
-            f"{type(error).__name__}: {error}"
-        )
-
-
-# ============================================================
-# DM NOTIFICATION
-# ============================================================
 
 async def send_notification(message: str):
+    """Send a DM to the bot owner."""
+
     try:
-        user = await bot.fetch_user(
-            YOUR_USER_ID
-        )
+        user = await bot.fetch_user(YOUR_USER_ID)
 
         if user:
             await user.send(message)
-
-            print(
-                f"📩 DM sent: {message}"
-            )
+            print(f"DM sent: {message}")
 
     except discord.Forbidden:
         print(
-            "⚠️ Could not send DM. "
+            "Could not send DM. "
             "User may have DMs disabled."
         )
 
     except discord.HTTPException as error:
-        print(
-            f"⚠️ Failed to send DM: {error}"
-        )
+        print(f"Failed to send DM: {error}")
 
-    except Exception as error:
-        print(
-            f"⚠️ Unexpected DM error: "
-            f"{type(error).__name__}: {error}"
-        )
-
-
-# ============================================================
-# VOICE CONNECTION
-# ============================================================
 
 async def connect_to_voice():
-    """
-    Ensure Koode is connected to the configured voice channel.
+    """Connect to the configured voice channel."""
 
-    This function is safe to call multiple times.
-    """
+    guild = bot.get_guild(SERVER_ID)
 
-    async with voice_connect_lock:
-
-        guild = bot.get_guild(
-            SERVER_ID
-        )
-
-        if guild is None:
-            print("⚠️ Server not found.")
-            return
-
-        voice_channel = guild.get_channel(
-            VOICE_CHANNEL_ID
-        )
-
-        if voice_channel is None:
-            print("⚠️ Voice channel not found.")
-            return
-
-        if not isinstance(
-            voice_channel,
-            discord.VoiceChannel,
-        ):
-            print(
-                "⚠️ Configured channel is not "
-                "a normal voice channel."
-            )
-            return
-
-        current_voice_client = discord.utils.get(
-            bot.voice_clients,
-            guild=guild,
-        )
-
-        # ----------------------------------------------------
-        # Already connected
-        # ----------------------------------------------------
-
-        if (
-            current_voice_client
-            and current_voice_client.is_connected()
-        ):
-            print(
-                f"🔊 Voice already connected: "
-                f"{current_voice_client.channel.name}"
-            )
-            return
-
-        # ----------------------------------------------------
-        # Stale / disconnected voice client
-        # ----------------------------------------------------
-
-        if current_voice_client:
-
-            print(
-                "⚠️ Found stale voice connection. "
-                "Cleaning it up..."
-            )
-
-            try:
-                await current_voice_client.disconnect(
-                    force=True
-                )
-
-            except Exception as error:
-                print(
-                    f"⚠️ Failed to clean stale voice "
-                    f"connection: {error}"
-                )
-
-        # ----------------------------------------------------
-        # Connect
-        # ----------------------------------------------------
-
-        try:
-
-            print(
-                f"🔊 Connecting to voice channel: "
-                f"{voice_channel.name}"
-            )
-
-            await voice_channel.connect(
-                reconnect=True
-            )
-
-            print(
-                f"✅ Voice connected: "
-                f"{voice_channel.name}"
-            )
-
-        except discord.Forbidden:
-            print(
-                "❌ Bot does not have permission "
-                "to join this voice channel."
-            )
-
-        except discord.HTTPException as error:
-            print(
-                f"❌ Discord HTTP error while "
-                f"connecting to voice: {error}"
-            )
-
-        except asyncio.TimeoutError:
-            print(
-                "❌ Voice connection timed out."
-            )
-
-        except Exception as error:
-            print(
-                f"❌ Unexpected voice connection error: "
-                f"{type(error).__name__}: {error}"
-            )
-
-
-# ============================================================
-# VOICE STATE UPDATE
-# ============================================================
-
-@bot.event
-async def on_voice_state_update(
-    member: discord.Member,
-    before: discord.VoiceState,
-    after: discord.VoiceState,
-):
-
-    # Only care about Koode itself
-    if member.id != bot.user.id:
+    if guild is None:
+        print("Server not found.")
         return
 
-    before_channel = (
-        before.channel.name
-        if before.channel
-        else "None"
+    voice_channel = guild.get_channel(VOICE_CHANNEL_ID)
+
+    if voice_channel is None:
+        print("Voice channel not found.")
+        return
+
+    if not isinstance(voice_channel, discord.VoiceChannel):
+        print(
+            "Configured channel is not a normal voice channel."
+        )
+        return
+
+    current_voice_client = discord.utils.get(
+        bot.voice_clients,
+        guild=guild,
     )
 
-    after_channel = (
-        after.channel.name
-        if after.channel
-        else "None"
-    )
+    if (
+        current_voice_client
+        and current_voice_client.is_connected()
+    ):
+        print("Bot is already connected to voice.")
+        return
 
-    print(
-        f"🔊 Voice state changed: "
-        f"{before_channel} -> {after_channel}"
-    )
-
-    # If Koode was disconnected from voice,
-    # try to restore the configured connection.
-    if after.channel is None:
+    try:
+        await voice_channel.connect()
 
         print(
-            "⚠️ Koode was disconnected from voice."
+            f"Connected to voice channel: "
+            f"{voice_channel.name}"
         )
 
-        await asyncio.sleep(2)
+    except discord.Forbidden:
+        print(
+            "Bot does not have permission to "
+            "join this voice channel."
+        )
 
-        await connect_to_voice()
+    except discord.HTTPException as error:
+        print(
+            f"Could not connect to voice channel: {error}"
+        )
 
 
-# ============================================================
-# READY
-# ============================================================
+def get_member_from_server(user_id: int):
+    """Get a member from the configured server."""
+
+    guild = bot.get_guild(SERVER_ID)
+
+    if guild is None:
+        return None
+
+    return guild.get_member(user_id)
+
+
+def is_owner(interaction: discord.Interaction) -> bool:
+    """Check whether the interaction was made by the bot owner."""
+
+    return interaction.user.id == YOUR_USER_ID
+
+
+# =========================================================
+# BOT EVENTS
+# =========================================================
 
 @bot.event
 async def on_ready():
+    print("=" * 50)
+    print(f"Logged in as: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
+    print(f"Connected servers: {len(bot.guilds)}")
+    print("=" * 50)
 
-    print("=" * 60)
-    print(f"🤖 Logged in as: {bot.user}")
-    print(f"🆔 Bot ID: {bot.user.id}")
-    print(f"🌐 Connected servers: {len(bot.guilds)}")
-    print(f"👀 Watching users: {len(watched_users)}")
-    print("=" * 60)
+    # Initialize active times for watched users.
+    guild = bot.get_guild(SERVER_ID)
 
-    # Set activity
+    if guild:
+        for user_id in watched_users:
+            member = guild.get_member(user_id)
+
+            if member and is_active_status(member.status):
+                if user_id not in online_since:
+                    online_since[user_id] = datetime.now(
+                        timezone.utc
+                    )
+
     await set_bot_activity()
 
-    # Sync commands
     try:
-
         synced_commands = await tree.sync()
 
         print(
-            f"✅ Synced {len(synced_commands)} "
+            f"Synced {len(synced_commands)} "
             f"slash commands."
         )
 
     except Exception as error:
-
         print(
-            f"❌ Failed to sync slash commands: "
-            f"{type(error).__name__}: {error}"
+            f"Failed to sync slash commands: {error}"
         )
 
-    # Connect to configured voice channel
+    # IMPORTANT:
+    # Keep the original voice connection behavior.
     await connect_to_voice()
 
-
-# ============================================================
-# DISCONNECT / RESUME
-# ============================================================
-
-@bot.event
-async def on_disconnect():
-
-    print(
-        "⚠️ Discord Gateway disconnected."
-    )
-
-    print(
-        "discord.py will attempt to reconnect automatically."
-    )
-
-
-@bot.event
-async def on_resumed():
-
-    print(
-        "✅ Discord Gateway connection resumed."
-    )
-
-    # Refresh activity after reconnect
-    await set_bot_activity()
-
-    # Make sure voice is still connected
-    await asyncio.sleep(2)
-
-    try:
-
-        await connect_to_voice()
-
-    except Exception as error:
-
-        print(
-            f"⚠️ Voice recovery failed after "
-            f"Gateway resume: "
-            f"{type(error).__name__}: {error}"
-        )
-
-
-# ============================================================
-# PRESENCE MONITORING
-# ============================================================
 
 @bot.event
 async def on_presence_update(
     before: discord.Member,
     after: discord.Member,
 ):
+    """
+    Monitor all users in watched_users.
+
+    Offline -> Online/Idle/DND:
+        - Start duration timer
+        - Send DM notification
+
+    Online/Idle/DND -> Offline:
+        - Stop duration timer
+        - Save duration
+
+    Online -> Idle:
+        Ignore
+
+    Idle -> DND:
+        Ignore
+
+    DND -> Online:
+        Ignore
+    """
 
     user_id = after.id
 
-    # Ignore users we aren't watching
+    # Ignore users that are not being watched.
     if user_id not in watched_users:
         return
 
-    before_active = is_active(
-        before.status
-    )
+    before_active = is_active_status(before.status)
+    after_active = is_active_status(after.status)
 
-    after_active = is_active(
-        after.status
-    )
-
-    before_status = get_status_text(
-        before.status
-    )
-
-    after_status = get_status_text(
-        after.status
-    )
+    before_text = get_status_text(before.status)
+    after_text = get_status_text(after.status)
 
     print(
-        f"👀 Watched user presence changed: "
+        f"Watched user presence changed: "
         f"{after.display_name}: "
-        f"{before_status} -> {after_status}"
+        f"{before_text} -> {after_text}"
     )
 
-    # --------------------------------------------------------
-    # Offline -> Active
-    # --------------------------------------------------------
-
-    if (
-        not before_active
-        and after_active
-    ):
-
-        online_since[user_id] = (
-            datetime.now(timezone.utc)
-        )
-
-        await send_notification(
-            f"🔔 **{after.display_name} "
-            f"is now {after_status}!**\n"
-            f"Discord ID: `{user_id}`"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Active -> Offline
-    # --------------------------------------------------------
-
-    if (
-        before_active
-        and not after_active
-    ):
-
-        start_time = online_since.get(
-            user_id
-        )
-
-        if start_time:
-
-            duration = (
-                datetime.now(timezone.utc)
-                - start_time
-            )
-
-            last_online_duration[user_id] = (
-                duration
-            )
-
-            del online_since[user_id]
-
-            print(
-                f"⏱️ {after.display_name} was "
-                f"online for "
-                f"{format_duration(duration)}"
-            )
-
-        return
-
-    # --------------------------------------------------------
-    # Active -> Active
+    # -----------------------------------------------------
+    # ACTIVE -> ACTIVE
+    # -----------------------------------------------------
     #
     # Online -> Idle
     # Idle -> DND
     # DND -> Online
     #
-    # These are intentionally ignored.
-    # --------------------------------------------------------
+    # Nothing happens.
+    #
+    if before_active and after_active:
+
+        # Safety: make sure a timer exists.
+        if user_id not in online_since:
+            online_since[user_id] = datetime.now(
+                timezone.utc
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # OFFLINE -> ACTIVE
+    # -----------------------------------------------------
+
+    if not before_active and after_active:
+
+        # Start timer.
+        online_since[user_id] = datetime.now(
+            timezone.utc
+        )
+
+        status_name = get_status_text(after.status)
+
+        await send_notification(
+            f"🔔 **{after.display_name} is now "
+            f"{status_name}!**\n"
+            f"Discord ID: `{after.id}`"
+        )
+
+        print(
+            f"Started timer for "
+            f"{after.display_name}"
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ACTIVE -> OFFLINE
+    # -----------------------------------------------------
+
+    if before_active and not after_active:
+
+        start_time = online_since.pop(
+            user_id,
+            None,
+        )
+
+        if start_time is None:
+            print(
+                f"No start time found for "
+                f"{after.display_name}."
+            )
+            return
+
+        duration = (
+            datetime.now(timezone.utc) - start_time
+        ).total_seconds()
+
+        last_online_duration[user_id] = duration
+
+        print(
+            f"{after.display_name} went offline. "
+            f"Active duration: "
+            f"{format_duration(duration)}"
+        )
 
 
-# ============================================================
-# /msg
-# ============================================================
+@bot.event
+async def on_disconnect():
+    # Keep original behavior.
+    print("Bot disconnected from Discord.")
+
+
+@bot.event
+async def on_resumed():
+    # Keep original behavior.
+    print("Bot connection resumed.")
+
+    await set_bot_activity()
+
+
+# =========================================================
+# SLASH COMMANDS
+# =========================================================
 
 @tree.command(
     name="msg",
@@ -647,25 +490,15 @@ async def msg_command(
     interaction: discord.Interaction,
     message: str,
 ):
-
     if MESSAGE_CHANNEL_ID != 0:
-
-        if (
-            interaction.channel_id
-            != MESSAGE_CHANNEL_ID
-        ):
-
+        if interaction.channel_id != MESSAGE_CHANNEL_ID:
             await interaction.response.send_message(
-                "❌ This command cannot be "
-                "used in this channel.",
+                "❌ This command cannot be used in this channel.",
                 ephemeral=True,
             )
-
             return
 
-    await interaction.channel.send(
-        message
-    )
+    await interaction.channel.send(message)
 
     await interaction.response.send_message(
         "✅ Message sent.",
@@ -673,75 +506,38 @@ async def msg_command(
     )
 
 
-# ============================================================
-# /status
-# ============================================================
-
 @tree.command(
     name="status",
-    description="Check a watched user's Discord status.",
-)
-@app_commands.describe(
-    user="The user to check"
+    description="Check the monitored user's Discord status.",
 )
 async def status_command(
     interaction: discord.Interaction,
-    user: discord.User | None = None,
 ):
-
-    if user is None:
-        user_id = TARGET_USER_ID
-    else:
-        user_id = user.id
-
-    if user_id not in watched_users:
-
-        await interaction.response.send_message(
-            "❌ That user is not being watched.",
-            ephemeral=True,
-        )
-
-        return
-
-    guild = bot.get_guild(
-        SERVER_ID
-    )
+    guild = bot.get_guild(SERVER_ID)
 
     if guild is None:
-
         await interaction.response.send_message(
             "❌ Server not found.",
             ephemeral=True,
         )
-
         return
 
-    member = guild.get_member(
-        user_id
-    )
+    member = guild.get_member(TARGET_USER_ID)
 
     if member is None:
-
         await interaction.response.send_message(
-            "❌ User is not found in the server.",
+            "❌ Target user is not found in the server.",
             ephemeral=True,
         )
-
         return
 
-    status_name = get_status_text(
-        member.status
-    )
+    status_name = get_status_text(member.status)
 
     await interaction.response.send_message(
-        f"👤 **{member.display_name}** "
-        f"is currently **{status_name}**."
+        f"👤 **{member.display_name}** is currently "
+        f"**{status_name}**."
     )
 
-
-# ============================================================
-# /ping
-# ============================================================
 
 @tree.command(
     name="ping",
@@ -750,19 +546,12 @@ async def status_command(
 async def ping_command(
     interaction: discord.Interaction,
 ):
-
-    latency = round(
-        bot.latency * 1000
-    )
+    latency = round(bot.latency * 1000)
 
     await interaction.response.send_message(
         f"🏓 Pong! `{latency}ms`"
     )
 
-
-# ============================================================
-# /info
-# ============================================================
 
 @tree.command(
     name="info",
@@ -771,56 +560,48 @@ async def ping_command(
 async def info_command(
     interaction: discord.Interaction,
 ):
-
     voice_status = "Not connected"
 
     for voice_client in bot.voice_clients:
-
-        if (
-            voice_client.guild.id
-            == SERVER_ID
-        ):
-
+        if voice_client.guild.id == SERVER_ID:
             if voice_client.is_connected():
-
-                voice_status = (
-                    voice_client.channel.name
-                )
+                voice_status = voice_client.channel.name
 
     embed = discord.Embed(
-        title="🤖 Koode",
+        title="🤖 Discord Bot Information",
         description=(
-            "Presence notification "
-            "and utility bot"
+            "Presence notification and utility bot"
         ),
         color=discord.Color.blurple(),
     )
 
     embed.add_field(
-        name="👀 Watched Users",
-        value=str(
-            len(watched_users)
-        ),
+        name="Watched Users",
+        value=str(len(watched_users)),
         inline=True,
     )
 
     embed.add_field(
-        name="🔊 Voice",
+        name="Server ID",
+        value=str(SERVER_ID),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Voice Channel",
         value=voice_status,
-        inline=True,
+        inline=False,
     )
 
     embed.add_field(
-        name="⚡ Latency",
+        name="Latency",
         value=f"{round(bot.latency * 1000)}ms",
         inline=True,
     )
 
     embed.add_field(
-        name="🌐 Servers",
-        value=str(
-            len(bot.guilds)
-        ),
+        name="Servers",
+        value=str(len(bot.guilds)),
         inline=True,
     )
 
@@ -836,10 +617,6 @@ async def info_command(
     )
 
 
-# ============================================================
-# /music
-# ============================================================
-
 @tree.command(
     name="music",
     description="Change the bot's listening activity.",
@@ -851,7 +628,6 @@ async def music_command(
     interaction: discord.Interaction,
     name: str,
 ):
-
     activity = discord.Activity(
         type=discord.ActivityType.listening,
         name=name,
@@ -868,323 +644,302 @@ async def music_command(
     )
 
 
-# ============================================================
-# /vc
-# ============================================================
-
 @tree.command(
     name="vc",
-    description="Connect the bot to the configured voice channel.",
+    description=(
+        "Connect the bot to the configured "
+        "voice channel."
+    ),
 )
 async def vc_command(
     interaction: discord.Interaction,
 ):
+    await connect_to_voice()
 
     await interaction.response.send_message(
-        "🔊 Checking voice connection...",
+        "🔊 Connecting to the configured voice channel.",
         ephemeral=True,
     )
 
-    await connect_to_voice()
-
-
-# ============================================================
-# /leave
-# ============================================================
 
 @tree.command(
     name="leave",
-    description="Disconnect the bot from the current voice channel.",
+    description=(
+        "Disconnect the bot from the current "
+        "voice channel."
+    ),
 )
 async def leave_command(
     interaction: discord.Interaction,
 ):
-
     disconnected = False
 
-    for voice_client in list(bot.voice_clients):
-
-        if (
-            voice_client.guild.id
-            == interaction.guild_id
-        ):
-
-            await voice_client.disconnect(
-                force=True
-            )
-
+    for voice_client in bot.voice_clients:
+        if voice_client.guild.id == interaction.guild_id:
+            await voice_client.disconnect()
             disconnected = True
 
     if disconnected:
-
         await interaction.response.send_message(
-            "👋 Disconnected from "
-            "the voice channel.",
+            "👋 Disconnected from the voice channel.",
             ephemeral=True,
         )
 
     else:
-
         await interaction.response.send_message(
-            "❌ I am not connected "
-            "to a voice channel.",
+            "❌ I am not connected to a voice channel.",
             ephemeral=True,
         )
 
 
-# ============================================================
-# /watch
-# ============================================================
+# =========================================================
+# WATCH COMMAND GROUP
+# =========================================================
 
-@tree.command(
+watch_group = app_commands.Group(
     name="watch",
-    description="Add, remove, or list watched users.",
+    description="Manage users being monitored.",
+)
+
+
+@watch_group.command(
+    name="add",
+    description="Add a user to the watch list.",
 )
 @app_commands.describe(
-    action="Choose add, remove, or list",
-    user="Discord user to add or remove",
+    user="The Discord user you want to monitor"
 )
-@app_commands.choices(
-    action=[
-        app_commands.Choice(
-            name="add",
-            value="add",
-        ),
-        app_commands.Choice(
-            name="remove",
-            value="remove",
-        ),
-        app_commands.Choice(
-            name="list",
-            value="list",
-        ),
-    ]
-)
-async def watch_command(
+async def watch_add(
     interaction: discord.Interaction,
-    action: app_commands.Choice[str],
-    user: discord.User | None = None,
+    user: discord.Member,
 ):
-
-    # Only bot owner can manage watches
-    if interaction.user.id != YOUR_USER_ID:
-
+    if not is_owner(interaction):
         await interaction.response.send_message(
-            "❌ You are not allowed to "
-            "manage the watch list.",
+            "❌ You do not have permission to use this.",
             ephemeral=True,
         )
-
         return
 
-    # --------------------------------------------------------
-    # LIST
-    # --------------------------------------------------------
-
-    if action.value == "list":
-
-        if not watched_users:
-
-            await interaction.response.send_message(
-                "👀 No users are currently "
-                "being watched.",
-                ephemeral=True,
-            )
-
-            return
-
-        lines = []
-
-        for user_id in watched_users:
-
-            watched_user = bot.get_user(
-                user_id
-            )
-
-            if watched_user:
-
-                lines.append(
-                    f"• {watched_user.mention} "
-                    f"(`{user_id}`)"
-                )
-
-            else:
-
-                lines.append(
-                    f"• <@{user_id}> "
-                    f"(`{user_id}`)"
-                )
-
+    if user.id in watched_users:
         await interaction.response.send_message(
-            "👀 **Watched Users**\n\n"
-            + "\n".join(lines)
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # ADD / REMOVE REQUIRE USER
-    # --------------------------------------------------------
-
-    if user is None:
-
-        await interaction.response.send_message(
-            f"❌ Please specify a user.\n"
-            f"Example: `/watch "
-            f"{action.value} @username`",
+            f"👀 **{user.display_name}** is already "
+            f"being watched.",
             ephemeral=True,
         )
-
         return
 
-    # --------------------------------------------------------
-    # ADD
-    # --------------------------------------------------------
+    watched_users.add(user.id)
 
-    if action.value == "add":
-
-        if user.id in watched_users:
-
-            await interaction.response.send_message(
-                f"👀 **{user.display_name}** "
-                f"is already being watched.",
-                ephemeral=True,
-            )
-
-            return
-
-        watched_users.add(
-            user.id
+    # If the user is currently active,
+    # start tracking immediately.
+    if is_active_status(user.status):
+        online_since[user.id] = datetime.now(
+            timezone.utc
         )
-
-        await interaction.response.send_message(
-            f"✅ Now watching "
-            f"**{user.display_name}**."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # REMOVE
-    # --------------------------------------------------------
-
-    if action.value == "remove":
-
-        if user.id not in watched_users:
-
-            await interaction.response.send_message(
-                f"❌ **{user.display_name}** "
-                f"is not being watched.",
-                ephemeral=True,
-            )
-
-            return
-
-        watched_users.remove(
-            user.id
-        )
-
-        online_since.pop(
-            user.id,
-            None,
-        )
-
-        last_online_duration.pop(
-            user.id,
-            None,
-        )
-
-        await interaction.response.send_message(
-            f"✅ Stopped watching "
-            f"**{user.display_name}**."
-        )
-
-
-# ============================================================
-# /duration
-# ============================================================
-
-@tree.command(
-    name="duration",
-    description="Check how long a watched user has been online.",
-)
-@app_commands.describe(
-    user="The watched user"
-)
-async def duration_command(
-    interaction: discord.Interaction,
-    user: discord.User,
-):
-
-    if user.id not in watched_users:
-
-        await interaction.response.send_message(
-            f"❌ **{user.display_name}** "
-            f"is not currently being watched.",
-            ephemeral=True,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Currently online
-    # --------------------------------------------------------
-
-    if user.id in online_since:
-
-        duration = (
-            datetime.now(timezone.utc)
-            - online_since[user.id]
-        )
-
-        await interaction.response.send_message(
-            f"🟢 **{user.display_name}** "
-            f"has been online for "
-            f"**{format_duration(duration)}**."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Currently offline but has history
-    # --------------------------------------------------------
-
-    if user.id in last_online_duration:
-
-        duration = last_online_duration[
-            user.id
-        ]
-
-        await interaction.response.send_message(
-            f"🔴 **{user.display_name}** "
-            f"is currently offline.\n"
-            f"Last online duration: "
-            f"**{format_duration(duration)}**"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # No history
-    # --------------------------------------------------------
 
     await interaction.response.send_message(
-        f"ℹ️ I don't have enough presence "
-        f"history for **{user.display_name}** yet."
+        f"✅ Now watching **{user.display_name}**.\n"
+        f"ID: `{user.id}`",
+        ephemeral=True,
+    )
+
+    print(
+        f"Added watched user: "
+        f"{user.display_name} ({user.id})"
     )
 
 
-# ============================================================
+@watch_group.command(
+    name="remove",
+    description="Remove a user from the watch list.",
+)
+@app_commands.describe(
+    user="The Discord user you want to stop monitoring"
+)
+async def watch_remove(
+    interaction: discord.Interaction,
+    user: discord.Member,
+):
+    if not is_owner(interaction):
+        await interaction.response.send_message(
+            "❌ You do not have permission to use this.",
+            ephemeral=True,
+        )
+        return
+
+    # Prevent removing the default user accidentally.
+    if user.id == TARGET_USER_ID:
+        await interaction.response.send_message(
+            "❌ The default monitored user cannot "
+            "be removed.",
+            ephemeral=True,
+        )
+        return
+
+    if user.id not in watched_users:
+        await interaction.response.send_message(
+            f"❌ **{user.display_name}** is not "
+            f"being watched.",
+            ephemeral=True,
+        )
+        return
+
+    watched_users.remove(user.id)
+
+    # Remove active tracking data.
+    online_since.pop(user.id, None)
+    last_online_duration.pop(user.id, None)
+
+    await interaction.response.send_message(
+        f"🗑️ Stopped watching "
+        f"**{user.display_name}**.",
+        ephemeral=True,
+    )
+
+    print(
+        f"Removed watched user: "
+        f"{user.display_name} ({user.id})"
+    )
+
+
+@watch_group.command(
+    name="list",
+    description="Show all users currently being watched.",
+)
+async def watch_list(
+    interaction: discord.Interaction,
+):
+    if not watched_users:
+        await interaction.response.send_message(
+            "👀 No users are currently being watched.",
+            ephemeral=True,
+        )
+        return
+
+    lines = []
+
+    for index, user_id in enumerate(
+        watched_users,
+        start=1,
+    ):
+        member = get_member_from_server(user_id)
+
+        if member:
+            status = get_status_text(member.status)
+
+            lines.append(
+                f"**{index}.** "
+                f"{member.display_name} "
+                f"— `{status}`\n"
+                f"   ID: `{user_id}`"
+            )
+
+        else:
+            lines.append(
+                f"**{index}.** "
+                f"<@{user_id}>\n"
+                f"   ID: `{user_id}`"
+            )
+
+    embed = discord.Embed(
+        title="👀 Watched Users",
+        description="\n\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+
+    embed.set_footer(
+        text=f"Total watched: {len(watched_users)}"
+    )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+tree.add_command(watch_group)
+
+
+# =========================================================
+# DURATION COMMAND
+# =========================================================
+
+@tree.command(
+    name="duration",
+    description="Show a user's current or last active duration.",
+)
+@app_commands.describe(
+    user="The Discord user"
+)
+async def duration_command(
+    interaction: discord.Interaction,
+    user: discord.Member,
+):
+    if user.id not in watched_users:
+        await interaction.response.send_message(
+            f"❌ **{user.display_name}** is not "
+            f"being watched.",
+            ephemeral=True,
+        )
+        return
+
+    # -----------------------------------------------------
+    # USER IS CURRENTLY ACTIVE
+    # -----------------------------------------------------
+
+    if user.id in online_since:
+        start_time = online_since[user.id]
+
+        current_duration = (
+            datetime.now(timezone.utc) - start_time
+        ).total_seconds()
+
+        status_name = get_status_text(user.status)
+
+        await interaction.response.send_message(
+            f"👤 **{user.display_name}** is currently "
+            f"**{status_name}**.\n\n"
+            f"⏱️ Active for: "
+            f"**{format_duration(current_duration)}**",
+            ephemeral=True,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # USER IS OFFLINE
+    # -----------------------------------------------------
+
+    if user.id in last_online_duration:
+        duration = last_online_duration[user.id]
+
+        await interaction.response.send_message(
+            f"👤 **{user.display_name}** is currently "
+            f"**Offline**.\n\n"
+            f"⏱️ Last active duration: "
+            f"**{format_duration(duration)}**",
+            ephemeral=True,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # NO DATA YET
+    # -----------------------------------------------------
+
+    await interaction.response.send_message(
+        f"👤 **{user.display_name}** has no recorded "
+        f"active duration yet.",
+        ephemeral=True,
+    )
+
+
+# =========================================================
 # START BOT
-# ============================================================
+# =========================================================
 
 if __name__ == "__main__":
 
-    print("=" * 60)
-    print("🚀 Starting Koode...")
-    print("=" * 60)
-
-    # Start Flask health server
     flask_thread = threading.Thread(
         target=run_flask,
         daemon=True,
@@ -1192,5 +947,4 @@ if __name__ == "__main__":
 
     flask_thread.start()
 
-    # Start Discord bot
     bot.run(TOKEN)
